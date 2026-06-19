@@ -10,7 +10,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PERSIST_DIR = "faiss_store"
-TOP_K = 5
+TOP_K = 8
 HOST = "127.0.0.1"
 PORT = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
 
@@ -44,31 +44,37 @@ def get_rag() -> RAGSearch:
     return rag
 
 
-def chat(message: str, history: list) -> str:
+def _format_retrieval_fallback(results: list) -> str:
+    chunks = []
+    for i, result in enumerate(results, 1):
+        meta = result["metadata"]
+        source = os.path.basename(str(meta.get("source", "unknown")))
+        preview = meta.get("content", "")[:600]
+        chunks.append(f"**[{i}] {source}** (score={result['score']:.3f})\n{preview}")
+
+    return (
+        "OPENAI_API_KEY is not set, so here are the top retrieved chunks:\n\n"
+        + "\n\n".join(chunks)
+    )
+
+
+def chat(message: str, history: list):
     message = message.strip()
     if not message:
-        return "Please enter a question."
+        yield "Please enter a question."
+        return
 
     engine = get_rag()
 
     if not os.getenv("OPENAI_API_KEY"):
         results = engine.search(message, top_k=TOP_K)
         if not results:
-            return "No relevant context found. Add documents to data/ and try again."
+            yield "No relevant context found. Add documents to data/ and try again."
+            return
+        yield _format_retrieval_fallback(results)
+        return
 
-        chunks = []
-        for i, result in enumerate(results, 1):
-            meta = result["metadata"]
-            source = os.path.basename(str(meta.get("source", "unknown")))
-            preview = meta.get("content", "")[:300]
-            chunks.append(f"**[{i}] {source}** (score={result['score']:.3f})\n{preview}")
-
-        return (
-            "OPENAI_API_KEY is not set, so here are the top retrieved chunks:\n\n"
-            + "\n\n".join(chunks)
-        )
-
-    return engine.search_and_summarize(message, top_k=TOP_K)
+    yield from engine.stream_search_and_summarize(message, top_k=TOP_K)
 
 
 def main() -> None:
@@ -79,12 +85,12 @@ def main() -> None:
         title="RAG Document Chatbot",
         description=(
             "Ask questions about the documents in your `data/` folder. "
-            "Answers are generated from retrieved context using your indexed sources."
+            "Answers are generated in detail from retrieved context and stream in real time."
         ),
         examples=[
-            "What is this document about?",
-            "Summarize the main topics.",
-            "What are the key details?",
+            "What is this document about? Explain in detail.",
+            "Summarize the main topics and key takeaways.",
+            "What are the important concepts and how do they relate?",
         ],
     )
 

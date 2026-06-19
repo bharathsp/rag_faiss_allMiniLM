@@ -7,7 +7,7 @@ A local retrieval-augmented generation (RAG) application that loads documents fr
 1. **Ingest** — Reads PDF, TXT, CSV, and XLSX files from `data/`.
 2. **Index** — Splits documents into chunks, embeds them with `all-MiniLM-L6-v2`, and saves vectors to `faiss_store/`.
 3. **Retrieve** — Finds the most relevant chunks for a user question using cosine similarity (inner product on normalized vectors).
-4. **Generate** — Sends retrieved context to OpenAI (`gpt-4o-mini`) and returns a natural-language answer.
+4. **Generate** — Sends retrieved context to OpenAI (`gpt-4o-mini`) and streams a detailed, structured natural-language answer in real time.
 
 ---
 
@@ -37,8 +37,8 @@ flowchart TB
 
     UI -->|user question| RS
     RS -->|retrieve chunks| VS
-    RS -->|summarize with context| LLM
-    LLM -->|answer| UI
+    RS -->|stream tokens| LLM
+    LLM -->|partial answer| UI
 
     RS --> VS
     VS --> EP
@@ -70,17 +70,42 @@ flowchart TD
 
 ## Query and chat flow
 
+Answers are **streamed token-by-token** to the Gradio UI as the LLM generates them. The prompt is tuned to produce **detailed, well-structured responses** with specifics and examples from the retrieved context.
+
 ```mermaid
 flowchart TD
     A[User types question in Gradio UI] --> B[RAGSearch.search]
     B --> C[Embed query string]
-    C --> D[FAISS similarity search top_k=5]
+    C --> D[FAISS similarity search top_k=8]
     D --> E{OPENAI_API_KEY set?}
     E -->|No| F[Return top retrieved chunks as preview]
-    E -->|Yes| G[Format context with sources and scores]
-    G --> H[Send context + question to LLM]
-    H --> I[Return generated answer to chat UI]
+    E -->|Yes| G[Format context with sources and scores<br/>max 16,000 chars]
+    G --> H[Stream context + question to LLM<br/>chain.stream]
+    H --> I[Yield growing answer to chat UI]
     F --> I
+```
+
+### Streaming sequence
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant G as Gradio chat()
+    participant R as RAGSearch
+    participant V as FaissVectorStore
+    participant L as OpenAI LLM
+
+    U->>G: Ask question
+    G->>R: stream_search_and_summarize()
+    R->>V: query() — retrieve top_k chunks
+    V-->>R: ranked chunks + scores
+    R->>R: _format_context() — dedupe, cap at 16k chars
+    R->>L: chain.stream(context, query)
+    loop Each token
+        L-->>R: token chunk
+        R-->>G: yield accumulated answer
+        G-->>U: update chat bubble
+    end
 ```
 
 ---
@@ -216,7 +241,7 @@ FAISS-backed vector store for persistence and similarity search.
 
 ### `src/search.py`
 
-High-level RAG orchestrator — ties together loading, vector search, and LLM generation.
+High-level RAG orchestrator — ties together loading, vector search, and LLM generation with **streaming support**.
 
 **`RAGSearch` lifecycle on init:**
 1. Create `FaissVectorStore`.
@@ -228,23 +253,30 @@ High-level RAG orchestrator — ties together loading, vector search, and LLM ge
 | Method | Description |
 |--------|-------------|
 | `search(query, top_k=5)` | Retrieval only — returns ranked chunk results |
-| `search_and_summarize(query, top_k=5)` | Retrieval + LLM answer grounded in context |
+| `stream_search_and_summarize(query, top_k=5)` | Retrieval + **streaming** LLM answer (yields growing text) |
+| `search_and_summarize(query, top_k=5)` | Retrieval + full LLM answer (collects streamed output) |
+
+**Answer quality:**
+- The system prompt instructs the LLM to write **detailed, thorough responses** with specific facts, examples, and clear structure (paragraphs or bullet points).
+- Retrieved context is deduplicated, annotated with source filenames and scores, and capped at **16,000 characters** to give the model more material for in-depth answers.
 
 **Optimizations:**
 - LLM and LangChain chain are **lazy-loaded** (only when summarization is needed).
-- Context formatting deduplicates chunks, includes source filenames and scores, and caps total context at ~12,000 characters.
+- `search_and_summarize()` reuses `stream_search_and_summarize()` internally — one code path for both streaming and non-streaming use.
 - Optional `min_score` filters out low-relevance hits before generation.
 
 ---
 
 ### `app.py`
 
-Gradio web UI entry point.
+Gradio web UI entry point with **real-time answer streaming**.
 
 - Loads `RAGSearch` once at startup.
 - Hosts a chat interface at `http://127.0.0.1:7860` (or the next free port if 7860 is busy).
-- If `OPENAI_API_KEY` is set → full RAG answers via `search_and_summarize()`.
-- If not set → returns top retrieved chunks as a fallback preview.
+- `chat()` is a **generator** that yields partial responses — Gradio updates the chat bubble as tokens arrive.
+- Retrieves **8 chunks** (`TOP_K = 8`) per question for richer context.
+- If `OPENAI_API_KEY` is set → streams detailed RAG answers via `stream_search_and_summarize()`.
+- If not set → returns top retrieved chunks as a fallback preview (600 chars per chunk).
 
 ---
 
@@ -323,7 +355,8 @@ These values are set in `app.py` and passed to `RAGSearch`:
 | `chunk_size` | `1000` | `app.py` → `RAGSearch(...)` |
 | `chunk_overlap` | `200` | `app.py` → `RAGSearch(...)` |
 | `llm_model` | `gpt-4o-mini` | `src/search.py` → `RAGSearch(...)` |
-| `top_k` | `5` | `app.py` → `TOP_K` |
+| `top_k` | `8` | `app.py` → `TOP_K` |
+| `max_context_chars` | `16000` | `src/search.py` → `_format_context()` |
 | `GRADIO_SERVER_PORT` | `7860` | Environment variable |
 
 ---
@@ -338,12 +371,17 @@ from src.search import RAGSearch
 rag = RAGSearch()
 
 # Retrieval only
-results = rag.search("What is attention?", top_k=5)
+results = rag.search("What is attention?", top_k=8)
 for r in results:
     print(r["score"], r["metadata"]["content"][:200])
 
-# Full RAG answer (requires OPENAI_API_KEY)
-answer = rag.search_and_summarize("What is attention?", top_k=5)
+# Streaming answer (requires OPENAI_API_KEY)
+for partial in rag.stream_search_and_summarize("What is attention?", top_k=8):
+    print(partial, end="\r")  # growing answer
+print()  # final newline
+
+# Full answer at once (requires OPENAI_API_KEY)
+answer = rag.search_and_summarize("What is attention?", top_k=8)
 print(answer)
 ```
 
@@ -371,4 +409,5 @@ print(answer)
 | `No documents found in data/` | Add supported files to `data/` before starting |
 | Answers seem outdated or wrong | Delete `faiss_store/` and restart to rebuild from current `data/` files |
 | Only chunk previews, no LLM answers | Set `OPENAI_API_KEY` in `.env` |
+| Answers not streaming | Ensure you are running the latest `app.py` — `chat()` must be a generator using `yield` |
 | First startup is slow | Normal — embedding all documents on first run takes time; later runs load from disk |

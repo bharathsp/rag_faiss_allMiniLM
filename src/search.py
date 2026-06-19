@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
@@ -15,8 +15,12 @@ DEFAULT_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "Answer the question using only the provided context. "
-            "If the context does not contain enough information, say so briefly.",
+            "You are a knowledgeable assistant answering questions based on provided documents. "
+            "Write a detailed, thorough response using only the context below. "
+            "Explain concepts clearly, include specific facts and examples from the sources, "
+            "and organize the answer with paragraphs or bullet points where appropriate. "
+            "When helpful, briefly note which ideas come from the retrieved material. "
+            "If the context is incomplete, state what you can answer and what is missing.",
         ),
         (
             "human",
@@ -77,7 +81,7 @@ class RAGSearch:
         return [result for result in results if result["score"] >= self.min_score]
 
     @staticmethod
-    def _format_context(results: List[Dict[str, Any]], max_chars: int = 12000) -> str:
+    def _format_context(results: List[Dict[str, Any]], max_chars: int = 16000) -> str:
         seen: set[str] = set()
         blocks: List[str] = []
         total = 0
@@ -98,10 +102,25 @@ class RAGSearch:
 
         return "\n\n".join(blocks)
 
-    def search_and_summarize(self, query: str, top_k: int = 5) -> str:
+    def _build_context(self, query: str, top_k: int) -> Optional[str]:
         results = self.search(query, top_k=top_k)
         if not results:
-            return "No relevant context found for that question."
+            return None
+        return self._format_context(results)
 
-        context = self._format_context(results)
-        return self.chain.invoke({"context": context, "query": query})
+    def stream_search_and_summarize(self, query: str, top_k: int = 5) -> Iterator[str]:
+        context = self._build_context(query, top_k)
+        if context is None:
+            yield "No relevant context found for that question."
+            return
+
+        accumulated = ""
+        for chunk in self.chain.stream({"context": context, "query": query}):
+            accumulated += chunk
+            yield accumulated
+
+    def search_and_summarize(self, query: str, top_k: int = 5) -> str:
+        last = ""
+        for partial in self.stream_search_and_summarize(query, top_k=top_k):
+            last = partial
+        return last
