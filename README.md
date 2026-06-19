@@ -278,6 +278,10 @@ Gradio web UI entry point with **real-time answer streaming**.
 - If `OPENAI_API_KEY` is set → streams detailed RAG answers via `stream_search_and_summarize()`.
 - If not set → returns top retrieved chunks as a fallback preview (600 chars per chunk).
 
+<img width="1828" height="973" alt="image" src="https://github.com/user-attachments/assets/7825c9c2-1743-427c-82bf-bc662f116a43" />
+<img width="1792" height="713" alt="image" src="https://github.com/user-attachments/assets/76b77039-606a-43ca-8f7e-d0817b909a08" />
+
+
 ---
 
 ## Setup
