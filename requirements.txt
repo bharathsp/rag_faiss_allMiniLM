@@ -1,0 +1,14 @@
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-text-splitters>=0.3.0
+python-dotenv>=1.0.0
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+faiss-cpu>=1.8.0
+pypdf>=4.0.0
+python-docx>=1.1.0
+docx2txt>=0.8
+openpyxl>=3.1.0
+unstructured>=0.16.0
+gradio>=5.0.0
